@@ -1,4 +1,3 @@
-
 import time
 import numpy as np
 import tensorflow as tf
@@ -8,12 +7,7 @@ import sys
 import bigan.cicids_2017_utilities as network
 import data.cicids_2017 as data
 from sklearn.metrics import precision_recall_fscore_support
-import pandas as pd 
-from sklearn.model_selection import train_test_split
-from glob import glob
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder, MinMaxScaler
 from sklearn.metrics import accuracy_score
-
 
 RANDOM_SEED = 13
 FREQ_PRINT = 20 # print frequency image tensorboard [20]
@@ -26,7 +20,7 @@ def get_getter(ema):  # to update neural net with moving avg variables, suitable
         return ema_var if ema_var else var
 
     return ema_getter
-#*
+
 def display_parameters(batch_size, starting_lr, ema_decay, weight, method, degree):
     '''See parameters
     '''
@@ -37,7 +31,6 @@ def display_parameters(batch_size, starting_lr, ema_decay, weight, method, degre
     print('Method for discriminator: ', method)
     print('Degree for L norms: ', degree)
 
-#*
 def display_progression_epoch(j, id_max):
     '''See epoch progression
     '''
@@ -45,14 +38,13 @@ def display_progression_epoch(j, id_max):
     sys.stdout.write(str(batch_progression) + ' % epoch' + chr(13))
     _ = sys.stdout.flush
 
-#*
 def create_logdir(method, weight, rd):
     """ Directory to save training logs, weights, biases, etc."""
-    return "bigan/train_logs/kdd/{}/{}/{}".format(weight, method, rd)
-
+    return "bigan/train_logs/cicids_2017/{}/{}/{}".format(weight, method, rd)
 
 def train_and_test(nb_epochs, weight, method, degree, random_seed):
-    """ Runs the Bigan on the CICIDS_2017 dataset
+    """ Runs the Bigan on the cicids_2017 dataset
+
     Note:
         Saves summaries on tensorboard. To display them, please use cmd line
         tensorboard --logdir=model.training_logdir() --port=number
@@ -64,7 +56,7 @@ def train_and_test(nb_epochs, weight, method, degree, random_seed):
         anomalous_label (int): int in range 0 to 10, is the class/digit
                                 which is considered outlier
     """
-    logger = logging.getLogger("BiGAN.cicids_2017.{}".format(method))
+    logger = logging.getLogger("BiGAN.train.cicids_2017.{}".format(method))
 
     # Placeholders
     input_pl = tf.placeholder(tf.float32, shape=data.get_shape_input(), name="input")
@@ -72,11 +64,8 @@ def train_and_test(nb_epochs, weight, method, degree, random_seed):
     learning_rate = tf.placeholder(tf.float32, shape=(), name="lr_pl")
 
     # Data
-    #********************************************************************** 
-
-    
-
-    #**********************************************************************
+    trainx, trainy ,testx,testy= data.get_train()
+    trainx_copy = trainx.copy()
 
     # Parameters
     starting_lr = network.learning_rate
@@ -85,8 +74,8 @@ def train_and_test(nb_epochs, weight, method, degree, random_seed):
     ema_decay = 0.9999
 
     rng = np.random.RandomState(RANDOM_SEED)
-    
-    
+    nr_batches_train = int(trainx.shape[0] / batch_size)
+    nr_batches_test = int(testx.shape[0] / batch_size)
 
     logger.info('Building training graph...')
 
@@ -228,170 +217,71 @@ def train_and_test(nb_epochs, weight, method, degree, random_seed):
 
         logger.info('Initialization done')
         writer = tf.summary.FileWriter(logdir, sess.graph)
-        
+        train_batch = 0
         epoch = 0
-        
+
         while not sv.should_stop() and epoch < nb_epochs:
-            tr_loss_gen=0
-            tr_loss_enc=0
-            tr_loss_dis=0
-            list_1=[x for x in range(0,8)]
-            train_batch = 0
-            for i in range(4):
 
-#******************************************************************************************************************************************
+            lr = starting_lr
+            begin = time.time()
 
-                #training data preprocessing
-            
-                train_list=np.random.choice(list_1,2,replace=False)
-                train_path='MachineLearningCVE/'
-                train_list_path=[train_path + str(x) + '.csv' for x in train_list]
-                InD = np.zeros((0,79),dtype=object)
-                for x in train_list_path:
-                    InD=np.vstack((InD,pd.read_csv(x)))
+             # construct randomly permuted minibatches
+            trainx = trainx[rng.permutation(trainx.shape[0])]  # shuffling dataset
+            trainx_copy = trainx_copy[rng.permutation(trainx.shape[0])]
+            train_loss_dis, train_loss_gen, train_loss_enc = [0, 0, 0]
 
-                #Dt=Data
-                Dt=InD[:,:-1].astype(float)
+            # training
+            for t in range(nr_batches_train):
+                
+                display_progression_epoch(t, nr_batches_train)             
+                ran_from = t * batch_size
+                ran_to = (t + 1) * batch_size
 
+                # train discriminator
+                feed_dict = {input_pl: trainx[ran_from:ran_to],
+                             is_training_pl: True,
+                             learning_rate:lr}
 
-                #Remove nan values
-                #L_n -- label without nan values
-                L_N=InD[~np.isnan(Dt).any(axis=1),-1]
-                #DtNMV -- data without nan values
-                D_N=Dt[~np.isnan(Dt).any(axis=1)]
+                _, ld, sm = sess.run([train_dis_op,
+                                      loss_discriminator,
+                                      sum_op_dis],
+                                     feed_dict=feed_dict)
+                train_loss_dis += ld
+                writer.add_summary(sm, train_batch)
 
+                # train generator and encoder
+                feed_dict = {input_pl: trainx_copy[ran_from:ran_to],
+                             is_training_pl: True,
+                             learning_rate:lr}
+                _,_, le, lg, sm = sess.run([train_gen_op,
+                                            train_enc_op,
+                                            loss_encoder,
+                                            loss_generator,
+                                            sum_op_gen],
+                                           feed_dict=feed_dict)
+                train_loss_gen += lg
+                train_loss_enc += le
+                writer.add_summary(sm, train_batch)
 
-                #Remove Inf values
-                #labels without nan and inf values
-                L_NI=L_N[~np.isinf(D_N).any(axis=1)]
-                #data without nan and inf values
-                D_NI=D_N[~np.isinf(D_N).any(axis=1)]
-                del(D_N)
+                train_batch += 1
 
-                D_NI=MinMaxScaler().fit_transform(D_NI)
+            train_loss_gen /= nr_batches_train
+            train_loss_enc /= nr_batches_train
+            train_loss_dis /= nr_batches_train
 
-                x_train_net=D_NI[L_NI=='BENIGN',:]
-                x_train_net=x_train_net[rng.permutation(x_train_net.shape[0])]
-                trainx=x_train_net[:int(x_train_net.shape[0]*0.6),:]
-
-                y_train=L_NI[L_NI=='BENIGN']
-
-                if i==0:
-                    x_test_anomaly=D_NI[L_NI!='BENIGN',:]
-                    x_test_benign=x_train_net[int(x_train_net.shape[0]*0.6):,:]
-                x_test_anomaly=np.vstack((x_test_anomaly,D_NI[L_NI!='BENIGN',:]))
-                x_test_benign=np.vstack((x_test_benign,x_train_net[int(x_train_net.shape[0]*0.6):,:]))
-                del(D_NI)
-                del(L_NI)
-
-                #trainx, trainy = data.get_train()
-                trainx_copy = trainx.copy()
-
-    #******************************************************************************************************************************************
-
-                lr = starting_lr
-                begin = time.time()
-
-                 # construct randomly permuted minibatches
-                trainx = trainx[rng.permutation(trainx.shape[0])]  # shuffling dataset
-                trainx_copy = trainx_copy[rng.permutation(trainx.shape[0])]
-                train_loss_dis, train_loss_gen, train_loss_enc = [0, 0, 0]
-
-                nr_batches_train = int(trainx.shape[0] / batch_size)
-
-                # training
-                for t in range(nr_batches_train):
-                    
-                    display_progression_epoch(t, nr_batches_train)             
-                    ran_from = t * batch_size
-                    ran_to = (t + 1) * batch_size
-
-                    # train discriminator
-                    feed_dict = {input_pl: trainx[ran_from:ran_to],
-                                 is_training_pl: True,
-                                 learning_rate:lr}
-
-                    _, ld, sm = sess.run([train_dis_op,
-                                          loss_discriminator,
-                                          sum_op_dis],
-                                         feed_dict=feed_dict)
-                    train_loss_dis += ld
-                    writer.add_summary(sm, train_batch)
-
-                    # train generator and encoder
-                    feed_dict = {input_pl: trainx_copy[ran_from:ran_to],
-                                 is_training_pl: True,
-                                 learning_rate:lr}
-                    _,_, le, lg, sm = sess.run([train_gen_op,
-                                                train_enc_op,
-                                                loss_encoder,
-                                                loss_generator,
-                                                sum_op_gen],
-                                               feed_dict=feed_dict)
-                    train_loss_gen += lg
-                    train_loss_enc += le
-                    writer.add_summary(sm, train_batch)
-
-            
-                    train_batch += 1
-
-                del(trainx)
-                del(trainx_copy)    
-                list_1=[x for x in list_1 if x not in train_list]
-                train_loss_gen /= (nr_batches_train)
-                tr_loss_gen+=train_loss_gen
-                train_loss_enc /= (nr_batches_train)
-                tr_loss_enc+=train_loss_enc
-                train_loss_dis /= (nr_batches_train)
-                tr_loss_dis+=train_loss_dis
-            tr_loss_dis /= 4
-            tr_loss_gen /= 4
-            tr_loss_enc /= 4
             logger.info('Epoch terminated')
-            print("Epoch %d | time = %ds | loss gen = %.4f | loss enc = %.4f | loss dis = %.4f " % (epoch, time.time() - begin, tr_loss_gen, tr_loss_enc, tr_loss_dis))
+            print("Epoch %d | time = %ds | loss gen = %.4f | loss enc = %.4f | loss dis = %.4f "
+                  % (epoch, time.time() - begin, train_loss_gen, train_loss_enc, train_loss_dis))
 
             epoch += 1
             
-                      
         logger.warn('Testing evaluation...')
-#*****************************************************************************************************************************
-        #testing data pre processing
-        # Normal data: label =0, anomalous data: label =1
-        rho=0.2
-
-
-        # normal data - x_test_benign
-
-        # anomalous data - x_test_anomaly
-
-        inds = rng.permutation(x_test_anomaly.shape[0])
-        x_test_anomaly=x_test_anomaly[inds]
-
-        inds = rng.permutation(x_test_benign.shape[0])
-        x_test_benign = x_test_benign[inds] 
-
-        size_test = x_test_benign.shape[0]
-        out_size_test = int(size_test*rho/(1-rho))
-
-        x_test_anomaly = x_test_anomaly[:out_size_test]
-
-        y_test_benign=np.ones(x_test_benign.shape[0])
-        y_test_anomaly=np.zeros(x_test_anomaly.shape[0])
-
-        testx = np.concatenate((x_test_benign,x_test_anomaly), axis=0)
-        testy = np.concatenate((y_test_benign,y_test_anomaly), axis=0)
-
-
-
-#*****************************************************************************************************************************
 
         inds = rng.permutation(testx.shape[0])
         testx = testx[inds]  # shuffling  dataset
         testy = testy[inds] # shuffling  dataset
         scores = []
         inference_time = []
-
-        nr_batches_test = int(testx.shape[0] / batch_size)
 
         # Create scores
         for t in range(nr_batches_test):
@@ -426,17 +316,28 @@ def train_and_test(nb_epochs, weight, method, degree, random_seed):
         scores += batch_score[:size]
 
         # Highest 80% are anomalous
-        per = np.percentile(scores, 90)
+        per = np.percentile(scores, 85)
+        print("per",per)
 
         y_pred = scores.copy()
         y_pred = np.array(y_pred)
+        print("predicted_y",y_pred)
+        np.savetxt('ypred.txt', y_pred, delimiter=',')
 
         inds = (y_pred < per)
         inds_comp = (y_pred >= per)
-
+        print("inds",inds.shape)
+        np.savetxt('inds.txt', inds, delimiter=',')
+        print("inds_complement",inds_comp.shape)
+        np.savetxt('inds_comp.txt', inds_comp, delimiter=',')
         y_pred[inds] = 1
         y_pred[inds_comp] = 0
+        
+        with open('ypred.txt', 'r') as f:
+            sorting = sorted(map(float, f.readlines()))
 
+        print(len(sorting))
+        print(sorting[908527])
 
         precision, recall, f1,_ = precision_recall_fscore_support(testy,
                                                                   y_pred,
@@ -445,10 +346,7 @@ def train_and_test(nb_epochs, weight, method, degree, random_seed):
         print(
             "Testing : Prec = %.4f | Rec = %.4f | F1 = %.4f "
             % (precision, recall, f1))
-
         print("accuracy : ", accuracy_score(testy, y_pred))
-
-
 
 def run(nb_epochs, weight, method, degree, label, random_seed=42):
     """ Runs the training process"""
